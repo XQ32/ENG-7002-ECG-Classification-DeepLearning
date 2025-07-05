@@ -1,35 +1,42 @@
 function [featureTable, featureNames] = extractHeartbeatFeatures(beatInfo, fs)
-% extractHeartbeatFeatures - Extracts features from heartbeat information structure for machine learning
+% extractHeartbeatFeatures - Extracts features from heartbeat info struct for machine learning
 %
-% Input:
-%   beatInfo - Struct array, containing heartbeat classification and feature point information (from detectAndClassifyHeartbeats.m)
-%     .beatType - Heartbeat type (1:Normal, 5:PVC, 8:PAC)
+% Inputs:
+%   beatInfo - Struct array containing heartbeat classification and feature point information (from detectAndClassifyHeartbeats.m)
+%     .beatType - Heartbeat type ('Other': Other, 'Normal': Normal, 'PVC': PVC, 'PAC': PAC)
 %     .segment - Extracted ECG segment
-%     .rIndex - R-wave index in the segment
-%     .pIndex - P-wave index in the segment
-%     .qIndex - Q-wave index in the segment
-%     .sIndex - S-wave index in the segment
-%     .tIndex - T-wave index in the segment
-%     .pEnd - P-wave end point index in the segment
-%     .tEnd - T-wave end point index in the segment
+%     .rIndex - Index of the R-wave within the segment
+%     .pIndex - Index of the P-wave within the segment
+%     .qIndex - Index of the Q-wave within the segment
+%     .sIndex - Index of the S-wave within the segment
+%     .tIndex - Index of the T-wave within the segment
+%     .pEnd - End point of the P-wave within the segment
+%     .tEnd - End point of the T-wave within the segment
 %     .segmentStartIndex - Starting index of the segment in the original ECG signal
 %   fs - Sampling frequency (Hz)
 %
-% Output:
-%   featureTable - Table, containing extracted features and heartbeat type labels
+% Outputs:
+%   featureTable - Table, containing extracted features and heartbeat type labels (normalized)
 %   featureNames - Cell array, containing feature names
 
-% Define feature names (keep in English for compatibility with machine learning tools)
-featureNames = {'RR_Prev', 'RR_Post', 'R_Amplitude', 'P_Amplitude', 'Q_Amplitude', 'S_Amplitude', 'T_Amplitude', ...
-                'PR_Interval', 'QRS_Duration', 'ST_Segment', 'QT_Interval', ...
-                'P_Duration', 'T_Duration', 'P_Area', 'QRS_Area', 'T_Area', ...
-                'R_Peak_Time_From_Prev_R', 'R_Peak_Time_To_Next_R', ... 
-                'BeatType'}; % Last column is the label
+% Feature names definition (removed R_Peak_Time_From_Prev_R, R_Peak_Time_To_Next_R, ST_Segment)
+% 
+% *** Core Feature Selection Explanation ***
+% Based on medical knowledge and feature importance analysis, the most important features for PVC vs. Other binary classification are:
+% 1. RR_Prev, RR_Post - Key features for premature beats (rhythm changes)
+% 2. QRS_Duration - Core feature for PVC (ventricular premature beats usually have a wider QRS)
+% 3. R_Amplitude - Main wave amplitude feature
+%
+% Currently extracting all features, using 4 core features during training to avoid overfitting
+featureNames = {'RR_Prev', 'RR_Post', 'R_Amplitude', 'Q_Amplitude', 'S_Amplitude', 'T_Amplitude', ...
+                'QRS_Duration', 'QT_Interval', ...
+                'T_Duration', 'QRS_Area', 'T_Area', ...
+                'BeatType'}; % The last column is the label
 
 numBeats = length(beatInfo);
 if numBeats == 0
     fprintf('Warning: beatInfo is empty, cannot extract features.\n');
-    % Return an empty table with column names consistent with featureNames
+    % Return an empty table with column names matching featureNames
     featureTable = array2table(zeros(0, length(featureNames)), 'VariableNames', featureNames);
     % Ensure BeatType column is categorical if possible
     if any(strcmp(featureNames, 'BeatType'))
@@ -38,11 +45,15 @@ if numBeats == 0
     return;
 end
 
-% Initialize feature matrix, each row a heartbeat, each column a feature
-% Add 1 because the last column is the BeatType label
-features = NaN(numBeats, length(featureNames));
+% Initialize feature matrix and label array
+% Numerical feature matrix (excluding BeatType)
+numericalFeatureNames = setdiff(featureNames, {'BeatType'});
+features = NaN(numBeats, length(numericalFeatureNames));
 
-% Calculate indices of all R-waves, used for calculating RR interval
+% Process labels separately
+beatTypeLabels = cell(numBeats, 1);
+
+% Calculate indices of all R-waves to compute RR intervals
 allRIndicesInECG = zeros(numBeats, 1);
 for k = 1:numBeats
     % beatInfo(k).rIndex is the index within the segment
@@ -61,147 +72,178 @@ for i = 1:numBeats
     pEndIdx = currentBeat.pEnd;
     tEndIdx = currentBeat.tEnd;
     
-    % 1. RR interval (RR_Prev, RR_Post)
+    % 1. RR interval features (RR_Prev, RR_Post)
     % Unit: seconds
     if i > 1
         rr_prev = (allRIndicesInECG(i) - allRIndicesInECG(i-1)) / fs;
-        features(i, strcmp(featureNames, 'RR_Prev')) = rr_prev;
-        features(i, strcmp(featureNames, 'R_Peak_Time_From_Prev_R')) = rr_prev; % Redundant feature, but sometimes used directly
+        features(i, strcmp(numericalFeatureNames, 'RR_Prev')) = rr_prev;
     else
-        features(i, strcmp(featureNames, 'RR_Prev')) = NaN; % First heartbeat has no previous RR
-        features(i, strcmp(featureNames, 'R_Peak_Time_From_Prev_R')) = NaN;
+        features(i, strcmp(numericalFeatureNames, 'RR_Prev')) = NaN; % The first heartbeat has no preceding RR
     end
     
     if i < numBeats
         rr_post = (allRIndicesInECG(i+1) - allRIndicesInECG(i)) / fs;
-        features(i, strcmp(featureNames, 'RR_Post')) = rr_post;
-        features(i, strcmp(featureNames, 'R_Peak_Time_To_Next_R')) = rr_post; % Redundant feature
+        features(i, strcmp(numericalFeatureNames, 'RR_Post')) = rr_post;
     else
-        features(i, strcmp(featureNames, 'RR_Post')) = NaN; % Last heartbeat has no next RR
-        features(i, strcmp(featureNames, 'R_Peak_Time_To_Next_R')) = NaN;
+        features(i, strcmp(numericalFeatureNames, 'RR_Post')) = NaN; % The last heartbeat has no subsequent RR
     end
     
-    % 2. Amplitude features (R, P, Q, S, T)
-    % Unit: mV (assuming original ECG unit is mV)
-    if ~isnan(rIdx)
-        features(i, strcmp(featureNames, 'R_Amplitude')) = segment(rIdx);
+    % 2. Amplitude features (R, Q, S, T) - P_Amplitude removed
+    % Unit: mV (assuming the original ECG unit is mV)
+    if ~isnan(rIdx) && rIdx > 0 && rIdx <= length(segment)
+        features(i, strcmp(numericalFeatureNames, 'R_Amplitude')) = segment(rIdx);
     end
-    if ~isnan(pIdx)
-        features(i, strcmp(featureNames, 'P_Amplitude')) = segment(pIdx);
+    if ~isnan(qIdx) && qIdx > 0 && qIdx <= length(segment)
+        features(i, strcmp(numericalFeatureNames, 'Q_Amplitude')) = segment(qIdx);
     end
-    if ~isnan(qIdx)
-        features(i, strcmp(featureNames, 'Q_Amplitude')) = segment(qIdx);
+    if ~isnan(sIdx) && sIdx > 0 && sIdx <= length(segment)
+        features(i, strcmp(numericalFeatureNames, 'S_Amplitude')) = segment(sIdx);
     end
-    if ~isnan(sIdx)
-        features(i, strcmp(featureNames, 'S_Amplitude')) = segment(sIdx);
-    end
-    if ~isnan(tIdx)
-        features(i, strcmp(featureNames, 'T_Amplitude')) = segment(tIdx);
+    if ~isnan(tIdx) && tIdx > 0 && tIdx <= length(segment)
+        features(i, strcmp(numericalFeatureNames, 'T_Amplitude')) = segment(tIdx);
     end
     
-    % 3. Interval features
-    % PR interval (from P-wave start to QRS complex start - usually Q-wave or R-wave)
-    % Unit: seconds
-    if ~isnan(pIdx) && ~isnan(qIdx) && qIdx > pIdx
-        features(i, strcmp(featureNames, 'PR_Interval')) = (qIdx - pIdx) / fs;
-    elseif ~isnan(pIdx) && ~isnan(rIdx) && rIdx > pIdx % If no Q-wave, use R-wave instead
-        features(i, strcmp(featureNames, 'PR_Interval')) = (rIdx - pIdx) / fs;
-    end
-    
-    % QRS duration (from Q-wave to S-wave end)
+    % 3. Interval features - PR_Interval removed
+    % QRS duration (corrected calculation method)
     % Unit: seconds
     if ~isnan(qIdx) && ~isnan(sIdx) && sIdx > qIdx
-        features(i, strcmp(featureNames, 'QRS_Duration')) = (sIdx - qIdx) / fs;
-    elseif ~isnan(rIdx) && ~isnan(sIdx) && sIdx > rIdx % If no Q-wave, calculate from R-wave to S-wave
-        features(i, strcmp(featureNames, 'QRS_Duration')) = (sIdx - rIdx) / fs;
-    elseif ~isnan(qIdx) && ~isnan(rIdx) && rIdx > qIdx % If no S-wave, calculate from Q-wave to R-wave
-        features(i, strcmp(featureNames, 'QRS_Duration')) = (rIdx - qIdx) / fs;
-    end
-    
-    % ST segment (from S-wave end to T-wave start - simplified here as time from S-wave to T-wave peak)
-    % Unit: seconds
-    if ~isnan(sIdx) && ~isnan(tIdx) && tIdx > sIdx
-        features(i, strcmp(featureNames, 'ST_Segment')) = (tIdx - sIdx) / fs;
+        features(i, strcmp(numericalFeatureNames, 'QRS_Duration')) = (sIdx - qIdx) / fs;
+    elseif ~isnan(rIdx) && ~isnan(sIdx) && sIdx > rIdx % If no Q-wave, calculate from R to S
+        features(i, strcmp(numericalFeatureNames, 'QRS_Duration')) = (sIdx - rIdx) / fs;
+    elseif ~isnan(qIdx) && ~isnan(rIdx) && rIdx > qIdx % If no S-wave, calculate from Q to R
+        features(i, strcmp(numericalFeatureNames, 'QRS_Duration')) = (rIdx - qIdx) / fs;
+    else
+        % If both Q and S are not detected, use a fixed QRS width estimate (approx. 0.08s)
+        features(i, strcmp(numericalFeatureNames, 'QRS_Duration')) = 0.08;
     end
     
     % QT interval (from Q-wave start to T-wave end)
     % Unit: seconds
     if ~isnan(qIdx) && ~isnan(tEndIdx) && tEndIdx > qIdx
-        features(i, strcmp(featureNames, 'QT_Interval')) = (tEndIdx - qIdx) / fs;
+        features(i, strcmp(numericalFeatureNames, 'QT_Interval')) = (tEndIdx - qIdx) / fs;
     elseif ~isnan(rIdx) && ~isnan(tEndIdx) && tEndIdx > rIdx % If no Q-wave, use R-wave
-         features(i, strcmp(featureNames, 'QT_Interval')) = (tEndIdx - rIdx) / fs;
+        features(i, strcmp(numericalFeatureNames, 'QT_Interval')) = (tEndIdx - rIdx) / fs;
     end
     
-    % P-wave duration (from P-wave start to P-wave end pEndIdx)
+    % T-wave duration (corrected calculation method)
     % Unit: seconds
-    if ~isnan(pIdx) && ~isnan(pEndIdx) && pEndIdx > pIdx
-        features(i, strcmp(featureNames, 'P_Duration')) = (pEndIdx - pIdx) / fs;
-    end
-
-    % T-wave duration (from T-wave start to T-wave end tEndIdx)
-    % Unit: seconds
-    % Assume T-wave start can be estimated by (tIdx - 0.05*fs) if T-wave onset is not precisely detected
-    % Or, if tIdx is the peak, can be defined from a point to tEndIdx
-    % Simplified here: if tIdx is known, T-wave duration from a point before tIdx (rough start) to tEndIdx
     if ~isnan(tIdx) && ~isnan(tEndIdx) && tEndIdx > tIdx
-        t_start_approx = max(1, tIdx - round(0.05*fs)); % Rough T-wave start
-        if tEndIdx > t_start_approx
-            features(i, strcmp(featureNames, 'T_Duration')) = (tEndIdx - t_start_approx) / fs;
+        % Use a more accurate T-wave start estimation method
+        t_start_approx = max(1, tIdx - round(0.08*fs)); % T-wave start is usually 80ms before the peak
+        if tEndIdx > t_start_approx && t_start_approx <= length(segment)
+            features(i, strcmp(numericalFeatureNames, 'T_Duration')) = (tEndIdx - t_start_approx) / fs;
         end
     end
     
-    % 4. Area features (approximate calculation, e.g., sum under trapezoidal rule)
-    % P-wave area (from pIdx to pEndIdx)
-    if ~isnan(pIdx) && ~isnan(pEndIdx) && pEndIdx > pIdx && pEndIdx <= length(segment)
-        p_wave_segment = segment(pIdx:pEndIdx);
-        features(i, strcmp(featureNames, 'P_Area')) = sum(p_wave_segment) / fs; % Approximate integral
-    end
-    
-    % QRS complex area (from qIdx to sIdx)
+    % 4. Area features (corrected calculation method) - P_Area removed
+    % QRS complex area (using trapezoidal integration)
     if ~isnan(qIdx) && ~isnan(sIdx) && sIdx > qIdx && sIdx <= length(segment)
         qrs_segment = segment(qIdx:sIdx);
-        features(i, strcmp(featureNames, 'QRS_Area')) = sum(qrs_segment) / fs; % Approximate integral
-    elseif ~isnan(rIdx) % If Q or S is missing, simplify to a small window around R-wave
-        r_area_start = max(1, rIdx - round(0.02*fs));
-        r_area_end = min(length(segment), rIdx + round(0.02*fs));
+        features(i, strcmp(numericalFeatureNames, 'QRS_Area')) = trapz(abs(qrs_segment)) / fs; % Use absolute value
+    elseif ~isnan(rIdx) % If Q or S is missing, use a window around the R-wave
+        r_area_start = max(1, rIdx - round(0.04*fs)); % Widen window to ±40ms
+        r_area_end = min(length(segment), rIdx + round(0.04*fs));
         if r_area_end > r_area_start
             qrs_segment = segment(r_area_start:r_area_end);
-            features(i, strcmp(featureNames, 'QRS_Area')) = sum(qrs_segment) / fs;
+            features(i, strcmp(numericalFeatureNames, 'QRS_Area')) = trapz(abs(qrs_segment)) / fs;
         end
     end
     
-    % T-wave area (from some T-wave start to tEndIdx)
+    % T-wave area (using trapezoidal integration)
     if ~isnan(tIdx) && ~isnan(tEndIdx) && tEndIdx > tIdx && tEndIdx <= length(segment)
-        t_start_approx = max(1, tIdx - round(0.05*fs)); % Rough T-wave start
-        if tEndIdx > t_start_approx
+        t_start_approx = max(1, tIdx - round(0.08*fs)); % Use the same start point as T_Duration
+        if tEndIdx > t_start_approx && t_start_approx <= length(segment)
             t_wave_segment = segment(t_start_approx:tEndIdx);
-            features(i, strcmp(featureNames, 'T_Area')) = sum(t_wave_segment) / fs; % Approximate integral
+            features(i, strcmp(numericalFeatureNames, 'T_Area')) = trapz(t_wave_segment) / fs;
         end
     end
     
-    % 5. Heartbeat type label
-    features(i, strcmp(featureNames, 'BeatType')) = currentBeat.beatType;
-end
-
-% Convert feature matrix to table
-featureTable = array2table(features, 'VariableNames', featureNames);
-
-% Ensure BeatType column is categorical
-% This may be important for some MATLAB classification tools
-if any(strcmp(featureNames, 'BeatType')) && ~isempty(featureTable)
-    try
-        featureTable.BeatType = categorical(featureTable.BeatType);
-    catch ME_cat
-        fprintf('Warning: Unable to convert BeatType column to categorical type: %s\n', ME_cat.message);
-        fprintf('Please check if the BeatType column contains non-numeric or unsuitable values for categorization.\n');
+    % 5. Heartbeat type label (processed separately)
+    if isa(currentBeat.beatType, 'char') || isa(currentBeat.beatType, 'string')
+        beatTypeLabels{i} = char(currentBeat.beatType); % Ensure it is a char type
+    else
+        beatTypeLabels{i} = 'Other'; % Default value
     end
 end
 
+% First create the table for numerical features
+numericalFeatureTable = array2table(features, 'VariableNames', numericalFeatureNames);
 
-% Can add some feature statistics or visualization (if needed)
-% For example: disp(summary(featureTable));
+% Add the BeatType column
+numericalFeatureTable.BeatType = beatTypeLabels;
 
-fprintf('Feature extraction completed, extracted %d features for %d heartbeats.\n', numBeats, length(featureNames)-1); % -1 because BeatType is a label
+% Reorder columns to ensure BeatType is last
+featureTable = numericalFeatureTable(:, featureNames);
+
+% Feature normalization (excluding BeatType column)
+fprintf('Starting feature normalization...\n');
+featureColumns = setdiff(featureNames, {'BeatType'}); % Exclude BeatType column
+
+for i = 1:length(featureColumns)
+    colName = featureColumns{i};
+    colData = featureTable{:, colName};
+    
+    % Remove NaN values for statistics
+    validData = colData(~isnan(colData));
+    
+    if ~isempty(validData) && length(validData) > 1
+        % Calculate mean and standard deviation
+        meanVal = mean(validData);
+        stdVal = std(validData);
+        
+        % Z-score normalization (if standard deviation is not 0)
+        if stdVal > 1e-10 % Avoid division by zero
+            normalizedData = (colData - meanVal) / stdVal;
+            featureTable{:, colName} = normalizedData;
+            fprintf('Feature %s: Mean=%.4f, Std Dev=%.4f, normalized\n', colName, meanVal, stdVal);
+        else
+            % If standard deviation is 0, perform min-max normalization
+            minVal = min(validData);
+            maxVal = max(validData);
+            if maxVal > minVal
+                normalizedData = (colData - minVal) / (maxVal - minVal);
+                featureTable{:, colName} = normalizedData;
+                fprintf('Feature %s: Std Dev is 0, using min-max normalization [%.4f, %.4f]\n', colName, minVal, maxVal);
+            else
+                fprintf('Feature %s: All values are the same, skipping normalization\n', colName);
+            end
+        end
+    else
+        fprintf('Feature %s: Not enough valid data, skipping normalization\n', colName);
+    end
+end
+
+% Ensure the BeatType column is of string type
+if any(strcmp(featureNames, 'BeatType')) && ~isempty(featureTable)
+    % BeatType column is already a cell array, convert to string array
+    if iscell(featureTable.BeatType)
+        featureTable.BeatType = string(featureTable.BeatType);
+    end
+    fprintf('BeatType column has been ensured to be of string type\n');
+end
+
+% Output feature extraction statistics
+fprintf('Feature extraction complete, extracted %d features for %d heartbeats (normalized).\n', length(featureNames)-1, numBeats);
+
+% Display the number of each beat type
+if ~isempty(featureTable)
+    beatTypes = featureTable.BeatType;
+    uniqueTypes = unique(beatTypes);
+    fprintf('Heartbeat type distribution:\n');
+    for i = 1:length(uniqueTypes)
+        count = sum(strcmp(beatTypes, uniqueTypes{i}));
+        fprintf('  %s: %d heartbeats (%.1f%%)\n', uniqueTypes{i}, count, (count/numBeats)*100);
+    end
+end
+
+% Output core feature usage recommendation
+fprintf('\n*** Feature Selection Recommendation ***\n');
+fprintf('To improve PVC recognition rate and avoid overfitting, it is recommended to use only the following core features when training the classifier:\n');
+fprintf('  1. RR_Prev, RR_Post - Rhythm change features for premature beats\n');
+fprintf('  2. QRS_Duration - Key feature for PVC (wide QRS)\n');
+fprintf('  3. R_Amplitude - Main wave amplitude feature\n');
+fprintf('trainClassifier.m is currently configured to use these 4 core features for PVC vs Other binary classification.\n');
+fprintf('Other features have been extracted but are commented out during training. To enable them, please modify predictorNames in trainClassifier.m.\n\n');
 
 end
 

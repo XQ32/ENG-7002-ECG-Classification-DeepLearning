@@ -1,87 +1,74 @@
 function [heartbeatSegments, beatInfo] = detectAndClassifyHeartbeats(ecg, ATRTIMED, ANNOTD, fs)
-% detectAndClassifyHeartbeats - Detects all heartbeats in the ECG signal based on annotation data, classifies them, and extracts preliminary information
+% detectAndClassifyHeartbeats - Detects all heartbeats in an ECG signal based on annotation data, classifies them, and extracts initial information.
 %
-% Input:
+% Inputs:
 %   ecg - Filtered ECG signal (column vector)
-%   ATRTIMED - Annotation time points (seconds) (column vector)
-%   ANNOTD - Annotation labels (numerical codes, column vector), e.g., 1:Normal, 5:PVC, 8:PAC
+%   ATRTIMED - Time points of annotations (in seconds) (column vector)
+%   ANNOTD - Annotation labels (string cell array), e.g., 'Normal': Normal, 'PVC': PVC, 'PAC': PAC, 'Other': Other
 %   fs - Sampling frequency (Hz)
 %
-% Output:
-%   heartbeatSegments - Cell array, containing ECG segments for each heartbeat (as column vectors)
+% Outputs:
+%   heartbeatSegments - Cell array, containing the ECG segment for each heartbeat (in column vector form)
 %   beatInfo - Struct array, containing heartbeat classification and feature point information
-%     .beatType - Heartbeat type (1:Normal, 5:PVC, 8:PAC)
+%     .beatType - Heartbeat type ('Normal': Normal, 'PVC': PVC, 'PAC': PAC, 'Other': Other)
 %     .segment - Extracted ECG segment
-%     .rIndex - R-wave index in the segment
-%     .pIndex - P-wave index in the segment
-%     .qIndex - Q-wave index in the segment
-%     .sIndex - S-wave index in the segment
-%     .tIndex - T-wave index in the segment
-%     .pEnd - P-wave end point index in the segment
-%     .tEnd - T-wave end point index in the segment
+%     .rIndex - Index of the R-wave within the segment
+%     .pIndex - Index of the P-wave within the segment
+%     .qIndex - Index of the Q-wave within the segment
+%     .sIndex - Index of the S-wave within the segment
+%     .tIndex - Index of the T-wave within the segment
+%     .pEnd - End point of the P-wave within the segment
+%     .tEnd - End point of the T-wave within the segment
 %     .segmentStartIndex - Starting index of the segment in the original ECG signal
 
 % Ensure ecg is a column vector
 ecg = ecg(:);
 
 % Initialize output variables - ensure they are column vectors
-heartbeatSegments = cell(3000000, 1);  % Preallocate a cell array for 3 million rows
+heartbeatSegments = cell(3000000, 1);  % Pre-allocate a 3 million row empty cell array
 
-% Create initial struct template
-initial_beat = struct('beatType', 0, 'segment', [], 'rIndex', 0, 'pIndex', NaN, ...
+% Create an initial struct template
+initial_beat = struct('beatType', 'Other', 'segment', [], 'rIndex', 0, 'pIndex', NaN, ...
                   'qIndex', NaN, 'sIndex', NaN, 'tIndex', NaN, 'pEnd', NaN, 'tEnd', NaN, ...
                   'segmentStartIndex', 0);
                   
-% Preallocate memory for 3 million heartbeat info structs
+% Pre-allocate memory to hold up to 3 million heartbeat infos
 beatInfo = repmat(initial_beat, 3000000, 1);
                   
 % Initialize heartbeat counters
 heartbeat_count = 0;
 beat_info_count = 0;
 
-% Get all heartbeat times and types
-beatTimes_seconds = ATRTIMED(:); % Ensure it's a column vector, already in seconds
-originalBeatTypes = ANNOTD(:);   % Ensure it's a column vector, already numerical codes
+% Get all heartbeat time points and types
+beatTimes_seconds = ATRTIMED(:); % Ensure it's a column vector, and already in seconds
+originalBeatTypes = ANNOTD(:);   % Ensure it's a column vector, a cell array containing string labels
 
 % Convert time points to sample indices (relative to the start of the ECG signal)
 beatIndices = round(beatTimes_seconds * fs); 
 
-% Filter valid annotation types and indices
-validBeatTypeCodes = [1, 5, 8]; % Type codes we are interested in
+% Filter for valid annotation types and indices
+validBeatTypeCodes = {'PVC', 'Other'}; % The two classes we are interested in: PVC and Other (PAC has been merged into Other)
 isConsideredType = ismember(originalBeatTypes, validBeatTypeCodes);
 
-beatTimes_seconds_filtered = beatTimes_seconds(isConsideredType);
+% beatTimes_seconds_filtered = beatTimes_seconds(isConsideredType);
 beatTypes_filtered = originalBeatTypes(isConsideredType);
 beatIndices_filtered = beatIndices(isConsideredType);
 
-% Further filter out invalid indices outside the signal length range
+% Further filter out invalid indices that are outside the signal length range
 validIdx = beatIndices_filtered > 0 & beatIndices_filtered <= length(ecg);
-% beatTimes_seconds_final = beatTimes_seconds_filtered(validIdx);
 finalBeatTypes = beatTypes_filtered(validIdx);
 finalBeatIndices = beatIndices_filtered(validIdx);
 
 try
-    % Part 1: Apply heplab_T_detect_MTEO algorithm to the entire ECG signal to detect all waveform points
-    fprintf('Starting waveform point detection for the entire ECG signal...\n');
-    [R_points, Q_points, S_points, T_points, P_points] = heplab_T_detect_MTEO(ecg, fs, false);
+    % Directly segment heartbeats based on original annotation indices
+    fprintf('Starting to segment heartbeats based on original annotation indices...\n');
     
-    % Output detection result statistics
-    fprintf('Waveform point detection completed, detected:\n');
-    fprintf('  R-wave points: %d\n', size(R_points, 1));
-    fprintf('  Q-wave points: %d\n', size(Q_points, 1));
-    fprintf('  S-wave points: %d\n', size(S_points, 1));
-    fprintf('  T-wave points: %d\n', size(T_points, 1));
-    fprintf('  P-wave points: %d\n', size(P_points, 1));
-    
-    % Part 2: Segment heartbeats based on original annotation indices
-    fprintf('Starting heartbeat segmentation based on original annotation indices...\n');
-    
-    % Heartbeat segment length: 0.5 seconds before and after R-wave
+    % Heartbeat segment length: 0.4 seconds before and after the R-wave
     segmentLength = round(0.4 * fs);
     
     % Process each original annotated R-wave
-    for i = 1:length(finalBeatIndices)
-        % Get the type and index in the original ECG of the current heartbeat
+for i = 1:length(finalBeatIndices)
+    % Get the type and index in the original ECG of the current heartbeat
         currentBeatType = finalBeatTypes(i);
         currentRIndex = finalBeatIndices(i);
         
@@ -89,205 +76,51 @@ try
         segmentStart = max(1, currentRIndex - segmentLength);
         segmentEnd = min(length(ecg), currentRIndex + segmentLength);
         
-        % Check if the segment length is as expected
+        % Check if the segment length meets expectations
         if (segmentEnd - segmentStart + 1) < (2 * segmentLength * 0.9)
-            fprintf('Warning: R-wave at index %d has insufficient segment length, skipping.\n', currentRIndex);
+            fprintf('Warning: R-wave segment at index %d is too short, skipping.\n', currentRIndex);
             continue;
         end
     
-    % Extract heartbeat segment
-    segment = ecg(segmentStart:segmentEnd);
-    
-    % Add heartbeat using counter
-    heartbeat_count = heartbeat_count + 1;
-    heartbeatSegments{heartbeat_count, 1} = segment;
-    
-    % Calculate the relative position of the R-wave in the current segment
-    rIndexInSegment = currentRIndex - segmentStart + 1;
-    
-    % Initialize indices of other waveform feature points in the segment
-    pIndexInSegment = NaN;
-    qIndexInSegment = NaN;
-    sIndexInSegment = NaN;
-    tIndexInSegment = NaN;
-    pEndInSegment = NaN;
-    tEndInSegment = NaN;
-    
-        % Find the Q-wave corresponding to the current segment
-        validQ = Q_points(Q_points(:,1) < currentRIndex & Q_points(:,1) > currentRIndex - round(0.2*fs), 1);
-        if ~isempty(validQ)
-            [~, idx] = max(validQ);  % Select the Q-point closest to the R-wave
-            qInECG = validQ(idx);
-            if qInECG >= segmentStart && qInECG <= segmentEnd
-                qIndexInSegment = qInECG - segmentStart + 1;
-            end
-        end
+        % Extract the heartbeat segment
+        segment = ecg(segmentStart:segmentEnd);
         
-        % Alternative Q-wave detection algorithm - if the main method did not find a Q-wave
-        if isnan(qIndexInSegment) && (currentBeatType == 5 || currentBeatType == 8) % Only apply alternative algorithm to non-normal heartbeats
-            % Search for local minimum as Q-wave within a 100ms window before R-wave
-            search_window = max(1, rIndexInSegment - round(0.1*fs)):rIndexInSegment-1;
-            if length(search_window) >= 3  % Ensure enough points
-                [min_val, min_idx] = min(segment(search_window));
-                q_candidate = search_window(min_idx);
-                if ~isempty(q_candidate) && q_candidate > 0 && q_candidate < length(segment)
-                    qIndexInSegment = q_candidate;
-                    fprintf('    Q-wave detected using alternative algorithm, located %dms before R-wave\n', round((rIndexInSegment-qIndexInSegment)*1000/fs));
-                end
-            end
-        end
+        % Add the heartbeat using a counter
+        heartbeat_count = heartbeat_count + 1;
+        heartbeatSegments{heartbeat_count, 1} = segment;
         
-        % Find the S-wave corresponding to the current segment
-        validS = S_points(S_points(:,1) > currentRIndex & S_points(:,1) < currentRIndex + round(0.2*fs), 1);
-        if ~isempty(validS)
-            [~, idx] = min(validS);  % Select the S-point closest to the R-wave
-            sInECG = validS(idx);
-            if sInECG >= segmentStart && sInECG <= segmentEnd
-                sIndexInSegment = sInECG - segmentStart + 1;
-            end
-        end
+        % Calculate the relative position of the R-wave in the current segment
+        rIndexInSegment = currentRIndex - segmentStart + 1;
         
-        % Alternative S-wave detection algorithm - if the main method did not find an S-wave
-        if isnan(sIndexInSegment) && (currentBeatType == 5 || currentBeatType == 8)  % Only apply alternative algorithm to non-normal heartbeats
-            % Search for local minimum as S-wave within a 100ms window after R-wave
-            search_window = (rIndexInSegment+1):min(length(segment), rIndexInSegment + round(0.1*fs));
-            if length(search_window) >= 3  % Ensure enough points
-                [min_val, min_idx] = min(segment(search_window));
-                s_candidate = search_window(min_idx);
-                if ~isempty(s_candidate) && s_candidate > 0 && s_candidate < length(segment)
-                    sIndexInSegment = s_candidate;
-                    fprintf('    S-wave detected using alternative algorithm, located %dms after R-wave\n', round((sIndexInSegment-rIndexInSegment)*1000/fs));
-                end
-            end
-        end
+        % Apply waveform detection algorithm to the current heartbeat segment
+        [pIndexInSegment, qIndexInSegment, sIndexInSegment, tIndexInSegment, pEndInSegment, tEndInSegment] = ...
+            detectWaveformsInSegment(segment, rIndexInSegment, fs, currentBeatType);
         
-        % Find the T-wave corresponding to the current segment - modified to find directly based on R-wave index
-        validT = T_points(T_points(:,1) > currentRIndex & T_points(:,1) < currentRIndex + round(0.5*fs), 1);
-        if ~isempty(validT)
-            [~, idx] = min(validT);  % Select the T-point closest after the R-wave
-            tInECG = validT(idx);
-            if tInECG >= segmentStart && tInECG <= segmentEnd
-                tIndexInSegment = tInECG - segmentStart + 1;
-                % Estimate T-wave end point: about 100ms after T-wave peak
-                tEndInSegment = min(length(segment), tIndexInSegment + round(0.1 * fs));
-            end
-        end
-        
-        % Alternative T-wave detection algorithm - if the main method did not find a T-wave
-        if isnan(tIndexInSegment) && (currentBeatType == 5 || currentBeatType == 8)  % Only apply alternative algorithm to non-normal heartbeats
-            % Search for local maximum in the 150-450ms range after S-wave or R-wave (if no S-wave)
-            if ~isnan(sIndexInSegment)
-                start_point = sIndexInSegment;
-            else
-                start_point = rIndexInSegment;
-            end
-            
-            % Define T-wave search window
-            t_start = start_point + round(0.15*fs);
-            t_end = min(length(segment), start_point + round(0.45*fs));
-            search_window = t_start:t_end;
-            
-            if length(search_window) >= 5  % Ensure enough points
-                % Smooth signal to reduce noise impact
-                if length(search_window) > 10
-                    smoothed = movmean(segment(search_window), 5);
-                    [max_val, max_idx] = max(smoothed);
-                    t_candidate = search_window(max_idx);
-                else
-                    [max_val, max_idx] = max(segment(search_window));
-                    t_candidate = search_window(max_idx);
-                end
-                
-                if ~isempty(t_candidate) && t_candidate > 0 && t_candidate < length(segment)
-                    tIndexInSegment = t_candidate;
-                    % Estimate T-wave end point
-                    tEndInSegment = min(length(segment), tIndexInSegment + round(0.1 * fs));
-                    fprintf('    T-wave detected using alternative algorithm, located %dms after R-wave\n', round((tIndexInSegment-rIndexInSegment)*1000/fs));
-                end
-            end
-        end
-        
-        % Find the P-wave corresponding to the current segment - modified to find directly based on R-wave index
-        validP = P_points(P_points(:,1) < currentRIndex & P_points(:,1) > currentRIndex - round(0.3*fs), 1);
-        if ~isempty(validP)
-            [~, idx] = max(validP);  % Select the P-point closest before the R-wave
-            pInECG = validP(idx);
-            if pInECG >= segmentStart && pInECG <= segmentEnd
-                pIndexInSegment = pInECG - segmentStart + 1;
-                % Estimate P-wave end point: if Q-wave exists, take midpoint between P-peak and Q-wave
-                if ~isnan(qIndexInSegment)
-                    pEndInSegment = round((pIndexInSegment + qIndexInSegment) / 2);
-                    pEndInSegment = max(1, min(pEndInSegment, length(segment)));
-                end
-            end
-        end
-        
-        % Alternative P-wave detection algorithm - if the main method did not find a P-wave
-        if isnan(pIndexInSegment) && (currentBeatType == 5 || currentBeatType == 8)  % Only apply alternative algorithm to non-normal heartbeats
-            % Search for local maximum in the 120-250ms range before R-wave
-            if ~isnan(qIndexInSegment)
-                end_point = qIndexInSegment;
-            else
-                end_point = rIndexInSegment;
-            end
-            
-            % Define P-wave search window
-            p_end = end_point - round(0.04*fs);  % P-wave should be at least 40ms before Q-wave
-            p_start = max(1, end_point - round(0.25*fs));  
-            search_window = p_start:p_end;
-            
-            if length(search_window) >= 5  % Ensure enough points
-                % Smooth signal to reduce noise impact
-                if length(search_window) > 10
-                    smoothed = movmean(segment(search_window), 5);
-                    [max_val, max_idx] = max(smoothed);
-                    p_candidate = search_window(max_idx);
-                else
-                    [max_val, max_idx] = max(segment(search_window));
-                    p_candidate = search_window(max_idx);
-                end
-                
-                if ~isempty(p_candidate) && p_candidate > 0 && p_candidate < length(segment)
-                    pIndexInSegment = p_candidate;
-                    
-                    % Estimate P-wave end point
-                    if ~isnan(qIndexInSegment)
-                        pEndInSegment = round((pIndexInSegment + qIndexInSegment) / 2);
-                    else
-                        pEndInSegment = min(length(segment), pIndexInSegment + round(0.07 * fs)); % P-wave width ~70ms
-                    end
-                    pEndInSegment = max(1, min(pEndInSegment, length(segment)));
-                    fprintf('    P-wave detected using alternative algorithm, located %dms before R-wave\n', round((rIndexInSegment-pIndexInSegment)*1000/fs));
-                end
-            end
-        end
-    
-    % Create heartbeat information struct
+        % Create the heartbeat information struct
         beat = struct('beatType', currentBeatType, ...
-                  'segment', segment, ...
-                  'rIndex', rIndexInSegment, ...
-                  'pIndex', pIndexInSegment, ...
-                  'qIndex', qIndexInSegment, ...
-                  'sIndex', sIndexInSegment, ...
-                  'tIndex', tIndexInSegment, ...
-                  'pEnd', pEndInSegment, ...
-                  'tEnd', tEndInSegment, ...
-                  'segmentStartIndex', segmentStart);
-                  
+                      'segment', segment, ...
+                      'rIndex', rIndexInSegment, ...
+                      'pIndex', pIndexInSegment, ...
+                      'qIndex', qIndexInSegment, ...
+                      'sIndex', sIndexInSegment, ...
+                      'tIndex', tIndexInSegment, ...
+                      'pEnd', pEndInSegment, ...
+                      'tEnd', tEndInSegment, ...
+                      'segmentStartIndex', segmentStart);
+                      
         beat_info_count = beat_info_count + 1;
         beatInfo(beat_info_count) = beat;
     end
     
-    fprintf('Heartbeat segmentation completed.\n');
+    fprintf('Heartbeat segmentation complete.\n');
     
 catch ME
-    fprintf('Error during waveform point detection or heartbeat segmentation: %s\n', ME.message);
-    % No longer throw an error, but return empty results
-    heartbeatSegments = cell(0, 1);  % Return an empty cell array, not the preallocated one
+    fprintf('Error during heartbeat segmentation process: %s\n', ME.message);
+    % No longer throws an error, but returns an empty result
+    heartbeatSegments = cell(0, 1);  % Return an empty cell array, not the pre-allocated one
     beatInfo = initial_beat([]); % Create an empty struct array but keep field names
-    fprintf('Returning empty results due to error, continuing to process next record.\n');
-    % No longer use rethrow(ME)
-    return;  % Return early, skip subsequent trimming steps
+    fprintf('Returning empty results due to error, continuing to the next record.\n');
+    return;  % Return early, skipping the subsequent trimming step
 end
 
 % Return only the actually used parts
@@ -296,15 +129,343 @@ beatInfo = beatInfo(1:beat_info_count);
 
 % Final statistics
 if beat_info_count > 0
-    types_extracted = [beatInfo.beatType];
-    fprintf('Processing completed, extracted and recorded %d heartbeats.\n', beat_info_count);
-    fprintf('  Extracted Normal heartbeats (Type 1): %d\n', sum(types_extracted == 1));
-    fprintf('  Extracted PVC heartbeats (Type 5): %d\n', sum(types_extracted == 5));
-    fprintf('  Extracted PAC heartbeats (Type 8): %d\n', sum(types_extracted == 8));
+    types_extracted = {beatInfo.beatType};
+    fprintf('Processing complete, a total of %d heartbeats were extracted and recorded.\n', beat_info_count);
+    fprintf('  Extracted PVC beats (Type PVC): %d\n', sum(strcmp(types_extracted, 'PVC')));
+    fprintf('  Extracted Other beats (Type Other): %d\n', sum(strcmp(types_extracted, 'Other')));
 else
-    fprintf('Processing completed, failed to extract any valid heartbeat information.\n');
+    fprintf('Processing complete, no valid heartbeat information could be extracted.\n');
 end
 
-fprintf('Returning %d heartbeat segments and info (trimmed from preallocated 3 million rows)\n', heartbeat_count);
+fprintf('Returning %d heartbeat segments and info (trimmed from pre-allocated array)\n', heartbeat_count);
 
+end
+
+% Sub-function: perform waveform detection on a single heartbeat segment
+function [pIndex, qIndex, sIndex, tIndex, pEnd, tEnd] = detectWaveformsInSegment(segment, rIndex, fs, beatType)
+% detectWaveformsInSegment - Uses alternative algorithms to detect P, Q, S, T waves in a single heartbeat segment
+%
+% Inputs:
+%   segment - ECG segment of a heartbeat
+%   rIndex - Position of the R-wave in the segment
+%   fs - Sampling frequency
+%   beatType - Heartbeat type
+%
+% Outputs:
+%   pIndex, qIndex, sIndex, tIndex - Position of each waveform in the segment
+%   pEnd, tEnd - End positions of the P and T waves
+
+    % Initialize output variables
+    pIndex = NaN;
+    qIndex = NaN;
+    sIndex = NaN;
+    tIndex = NaN;
+    pEnd = NaN;
+    tEnd = NaN;
+    
+    % Ensure segment is a column vector
+    segment = segment(:);
+    segmentLength = length(segment);
+    
+    try
+        % Method 1: Basic local extremum detection
+        % Q-wave detection - search for local minimum within 100ms before R-wave
+        qSearchStart = max(1, rIndex - round(0.1*fs));
+        qSearchEnd = rIndex - 1;
+        if qSearchEnd > qSearchStart
+            qSearchWindow = qSearchStart:qSearchEnd;
+            if length(qSearchWindow) >= 3
+                [~, minIdx] = min(segment(qSearchWindow));
+                qIndex = qSearchWindow(minIdx);
+            end
+        end
+        
+        % S-wave detection - search for local minimum within 100ms after R-wave
+        sSearchStart = rIndex + 1;
+        sSearchEnd = min(segmentLength, rIndex + round(0.1*fs));
+        if sSearchEnd > sSearchStart
+            sSearchWindow = sSearchStart:sSearchEnd;
+            if length(sSearchWindow) >= 3
+                [~, minIdx] = min(segment(sSearchWindow));
+                sIndex = sSearchWindow(minIdx);
+            end
+        end
+        
+        % T-wave detection - use improved algorithm
+        [tIndex, tEnd] = detectTWave(segment, rIndex, sIndex, fs);
+        
+        % P-wave detection - use improved algorithm
+        [pIndex, pEnd] = detectPWave(segment, rIndex, qIndex, fs);
+        
+        % Method 2: Use more complex algorithms for abnormal heartbeats
+        if strcmp(beatType, 'PVC') || strcmp(beatType, 'PAC') || strcmp(beatType, 'Other')
+            % Use P/T wave detection based on a triangular filter (from detectionFunctions)
+            [pIndex_alt, tIndex_alt] = detectPTWavesWithTriangularFilter(segment, rIndex, fs);
+            
+            % If the basic method did not detect it, use the alternative result
+            if isnan(pIndex) && ~isnan(pIndex_alt)
+                pIndex = pIndex_alt;
+                % Recalculate P-wave end point
+                if ~isnan(qIndex)
+                    pEnd = round((pIndex + qIndex) / 2);
+                else
+                    pEnd = min(segmentLength, pIndex + round(0.07 * fs));
+                end
+                pEnd = max(1, min(pEnd, segmentLength));
+            end
+            
+            if isnan(tIndex) && ~isnan(tIndex_alt)
+                tIndex = tIndex_alt;
+                tEnd = min(segmentLength, tIndex + round(0.1 * fs));
+            end
+            
+            % Use enhanced Q/S wave detection
+            [qIndex_alt, sIndex_alt] = detectQSWavesEnhanced(segment, rIndex, fs);
+            
+            % If the basic method did not detect it, use the alternative result
+            if isnan(qIndex) && ~isnan(qIndex_alt)
+                qIndex = qIndex_alt;
+            end
+            if isnan(sIndex) && ~isnan(sIndex_alt)
+                sIndex = sIndex_alt;
+            end
+        end
+        
+    catch ME
+        fprintf('Warning: An error occurred during waveform detection: %s\n', ME.message);
+        % Return NaN values on error
+    end
+end
+
+% P-wave detection sub-function
+function [pIndex, pEnd] = detectPWave(segment, rIndex, qIndex, fs)
+    pIndex = NaN;
+    pEnd = NaN;
+    segmentLength = length(segment);
+    
+    % Determine the search range
+    if ~isnan(qIndex)
+        pSearchEnd = qIndex - round(0.04*fs); % End 40ms before Q-wave
+    else
+        pSearchEnd = rIndex - round(0.08*fs); % End 80ms before R-wave
+    end
+    pSearchStart = max(1, rIndex - round(0.25*fs)); % Start 250ms before R-wave
+    
+    if pSearchEnd > pSearchStart
+        pSearchWindow = pSearchStart:pSearchEnd;
+        if length(pSearchWindow) >= 5
+            % Method 1: Directly find the maximum value
+            if length(pSearchWindow) > 10
+                smoothed = movmean(segment(pSearchWindow), 5);
+                [~, maxIdx] = max(smoothed);
+            else
+                [~, maxIdx] = max(segment(pSearchWindow));
+            end
+            pIndex = pSearchWindow(maxIdx);
+            
+            % Method 2: Find a relatively high peak (to avoid noise interference)
+            threshold = mean(segment(pSearchWindow)) + 0.3 * std(segment(pSearchWindow));
+            candidateIndices = find(segment(pSearchWindow) > threshold);
+            if ~isempty(candidateIndices)
+                [~, maxIdx] = max(segment(pSearchWindow(candidateIndices)));
+                pIndex_candidate = pSearchWindow(candidateIndices(maxIdx));
+                
+                % Choose a more reasonable P-wave position
+                if abs(pIndex_candidate - (rIndex - round(0.16*fs))) < abs(pIndex - (rIndex - round(0.16*fs)))
+                    pIndex = pIndex_candidate;
+                end
+            end
+            
+            % Estimate P-wave end point
+            if ~isnan(qIndex)
+                pEnd = round((pIndex + qIndex) / 2);
+            else
+                pEnd = min(segmentLength, pIndex + round(0.07 * fs)); % P-wave width is about 70ms
+            end
+            pEnd = max(1, min(pEnd, segmentLength));
+        end
+    end
+end
+
+% T-wave detection sub-function
+function [tIndex, tEnd] = detectTWave(segment, rIndex, sIndex, fs)
+    tIndex = NaN;
+    tEnd = NaN;
+    segmentLength = length(segment);
+    
+    % Determine the search range
+    if ~isnan(sIndex)
+        tSearchStart = sIndex + round(0.05*fs); % Start 50ms after S-wave
+    else
+        tSearchStart = rIndex + round(0.15*fs); % Start 150ms after R-wave
+    end
+    tSearchEnd = min(segmentLength, rIndex + round(0.45*fs));
+    
+    if tSearchEnd > tSearchStart
+        tSearchWindow = tSearchStart:tSearchEnd;
+        if length(tSearchWindow) >= 5
+            % Method 1: Directly find the maximum value
+            if length(tSearchWindow) > 10
+                smoothed = movmean(segment(tSearchWindow), 5);
+                [~, maxIdx] = max(smoothed);
+            else
+                [~, maxIdx] = max(segment(tSearchWindow));
+            end
+            tIndex = tSearchWindow(maxIdx);
+            
+            % Method 2: Find a peak that matches T-wave characteristics
+            % T-wave usually appears 200-350ms after the R-wave
+            idealTPosition = rIndex + round(0.275*fs); % Ideal T-wave position
+            idealTWindow = max(tSearchStart, idealTPosition - round(0.075*fs)):...
+                          min(tSearchEnd, idealTPosition + round(0.075*fs));
+            
+            if ~isempty(idealTWindow)
+                [~, maxIdxIdeal] = max(segment(idealTWindow));
+                tIndex_ideal = idealTWindow(maxIdxIdeal);
+                
+                % If the T-wave at the ideal position is significant enough, prefer it
+                if segment(tIndex_ideal) > 0.7 * segment(tIndex)
+                    tIndex = tIndex_ideal;
+                end
+            end
+            
+            % Estimate T-wave end point: about 100ms after T-wave peak
+            tEnd = min(segmentLength, tIndex + round(0.1 * fs));
+        end
+    end
+end
+
+% P/T wave detection based on triangular filter (idea from detectionFunctions)
+function [pIndex, tIndex] = detectPTWavesWithTriangularFilter(segment, rIndex, fs)
+    pIndex = NaN;
+    tIndex = NaN;
+    
+    try
+        % Create a triangular filter (0.1s width)
+        triangular_duration = round(0.1 * fs);
+        init_filter_coeffs = -triangular_duration/2:triangular_duration/2;
+        triangular_filter = ((-abs(init_filter_coeffs) + triangular_duration/2 * ones(1, triangular_duration+1)) / (triangular_duration/2))';
+        
+        % Remove the influence of the QRS complex
+        qrs_radius = round(triangular_duration/2);
+        segment_for_pt = segment;
+        
+        % Zero out around the R-wave
+        zeroStart = max(1, rIndex - qrs_radius);
+        zeroEnd = min(length(segment), rIndex + qrs_radius);
+        segment_for_pt(zeroStart:zeroEnd) = 0;
+        
+        % Apply the triangular filter
+        if length(segment_for_pt) >= length(triangular_filter)
+            correlated_data = conv(segment_for_pt, triangular_filter, 'same');
+            
+            % Find P-wave (before R-wave)
+            pSearchStart = max(1, rIndex - round(0.3*fs));
+            pSearchEnd = rIndex - round(0.05*fs);
+            if pSearchEnd > pSearchStart
+                pSearchWindow = pSearchStart:pSearchEnd;
+                [~, maxIdx] = max(correlated_data(pSearchWindow));
+                pIndex = pSearchWindow(maxIdx);
+            end
+            
+            % Find T-wave (after R-wave)
+            tSearchStart = rIndex + round(0.1*fs);
+            tSearchEnd = min(length(segment), rIndex + round(0.5*fs));
+            if tSearchEnd > tSearchStart
+                tSearchWindow = tSearchStart:tSearchEnd;
+                [~, maxIdx] = max(correlated_data(tSearchWindow));
+                tIndex = tSearchWindow(maxIdx);
+            end
+        end
+    catch
+        % If an error occurs, return NaN
+    end
+end
+
+% Enhanced Q/S wave detection
+function [qIndex, sIndex] = detectQSWavesEnhanced(segment, rIndex, fs)
+    qIndex = NaN;
+    sIndex = NaN;
+    
+    try
+        % Q-wave detection - use derivative and morphological methods
+        qSearchStart = max(1, rIndex - round(0.12*fs));
+        qSearchEnd = rIndex - 1;
+        
+        if qSearchEnd > qSearchStart
+            qSearchWindow = qSearchStart:qSearchEnd;
+            
+            % Method 1: Find local minimum
+            [~, minIdx] = min(segment(qSearchWindow));
+            qIndex_method1 = qSearchWindow(minIdx);
+            
+            % Method 2: Find point after maximum negative derivative
+            if length(qSearchWindow) > 3
+                diff_signal = diff(segment(qSearchWindow));
+                [~, minDiffIdx] = min(diff_signal);
+                qIndex_method2 = qSearchWindow(minDiffIdx + 1);
+                
+                % Choose a more reasonable Q-wave position (usually 40-80ms before R-wave)
+                ideal_q_pos = rIndex - round(0.06*fs);
+                if abs(qIndex_method2 - ideal_q_pos) < abs(qIndex_method1 - ideal_q_pos)
+                    qIndex = qIndex_method2;
+                else
+                    qIndex = qIndex_method1;
+                end
+            else
+                qIndex = qIndex_method1;
+            end
+        end
+        
+        % S-wave detection - use derivative and morphological methods
+        sSearchStart = rIndex + 1;
+        sSearchEnd = min(length(segment), rIndex + round(0.12*fs));
+        
+        if sSearchEnd > sSearchStart
+            sSearchWindow = sSearchStart:sSearchEnd;
+            
+            % Method 1: Find local minimum
+            [~, minIdx] = min(segment(sSearchWindow));
+            sIndex_method1 = sSearchWindow(minIdx);
+            
+            % Method 2: Find point after maximum negative derivative
+            if length(sSearchWindow) > 3
+                diff_signal = diff(segment(sSearchWindow));
+                [~, minDiffIdx] = min(diff_signal);
+                sIndex_method2 = sSearchWindow(minDiffIdx + 1);
+                
+                % Choose a more reasonable S-wave position (usually 20-60ms after R-wave)
+                ideal_s_pos = rIndex + round(0.04*fs);
+                if abs(sIndex_method2 - ideal_s_pos) < abs(sIndex_method1 - ideal_s_pos)
+                    sIndex = sIndex_method2;
+                else
+                    sIndex = sIndex_method1;
+                end
+            else
+                sIndex = sIndex_method1;
+            end
+        end
+        
+    catch
+        % If an error occurs, return NaN
+    end
+end
+
+% Simplified peak detection sub-function
+function peaks = detectPeaksInSegment(data)
+% detectPeaksInSegment - Simplified peak detection algorithm
+    peaks = [];
+    data = data(:);
+    n = length(data);
+    
+    if n < 3
+        return;
+    end
+    
+    % Find local maxima
+    for i = 2:n-1
+        if data(i) > data(i-1) && data(i) > data(i+1) && data(i) > 0.1*max(data)
+            peaks = [peaks; i];
+        end
+    end
 end
